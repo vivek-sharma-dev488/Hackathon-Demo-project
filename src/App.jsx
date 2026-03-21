@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -157,6 +157,8 @@ export default function App() {
   const [creatingHostel, setCreatingHostel] = useState(false);
   const [hostelForm, setHostelForm] = useState({ name: "", kind: "hostel" });
 
+  const membershipLoadSeq = useRef(0);
+
   const [portionByMeal, setPortionByMeal] = useState({});
   const [mealForm, setMealForm] = useState({
     id: "",
@@ -289,6 +291,7 @@ export default function App() {
 
   async function loadMembership() {
     if (!session?.user) return;
+    const seq = (membershipLoadSeq.current += 1);
     setMembershipLoading(true);
     try {
       const { data, error } = await retryRead(
@@ -301,6 +304,8 @@ export default function App() {
             .maybeSingle(),
         { retries: 2 }
       );
+
+      if (seq !== membershipLoadSeq.current) return;
 
       if (error) {
         setAuthError(formatSupabaseError(error, "Failed to load hostel membership."));
@@ -317,9 +322,12 @@ export default function App() {
       setMyHostel(data.hostels || null);
       setAuthError("");
     } catch (error) {
+      if (seq !== membershipLoadSeq.current) return;
       setAuthError(formatSupabaseError(error, "Failed to load hostel membership."));
     } finally {
-      setMembershipLoading(false);
+      if (seq === membershipLoadSeq.current) {
+        setMembershipLoading(false);
+      }
     }
   }
 
@@ -362,6 +370,7 @@ export default function App() {
           setMyHostel(data);
           setMyMembership({ role: "owner", created_at: new Date().toISOString() });
           setHostelForm({ name: "", kind: hostelForm.kind });
+          await loadMembership();
           return;
         }
 
@@ -448,6 +457,8 @@ export default function App() {
       }
 
       setAllUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+      setRoleDraftByUserId((prev) => ({ ...prev, [userId]: newRole }));
+      await loadUsers();
       setAuthError("");
     } catch (error) {
       setAuthError(formatSupabaseError(error, "Failed to update user role."));
