@@ -341,6 +341,23 @@ for delete
 using (public.is_admin());
 
 -- Realtime support
-alter publication supabase_realtime add table public.meals;
-alter publication supabase_realtime add table public.bookings;
-alter publication supabase_realtime add table public.waste_logs;
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table public.meals;
+  exception
+    when duplicate_object then null;
+  end;
+
+  begin
+    alter publication supabase_realtime add table public.bookings;
+  exception
+    when duplicate_object then null;
+  end;
+
+  begin
+    alter publication supabase_realtime add table public.waste_logs;
+  exception
+    when duplicate_object then null;
+  end;
+end $$;
