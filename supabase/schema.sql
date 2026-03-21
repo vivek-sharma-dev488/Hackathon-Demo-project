@@ -244,6 +244,11 @@ end;
 $$;
 
 -- MEALS policies
+drop policy if exists "Anyone authenticated can read meals" on public.meals;
+drop policy if exists "Admins can insert meals" on public.meals;
+drop policy if exists "Admins can update meals" on public.meals;
+drop policy if exists "Admins can delete meals" on public.meals;
+
 create policy "Anyone authenticated can read meals"
 on public.meals
 for select
@@ -266,6 +271,13 @@ for delete
 using (public.is_admin());
 
 -- BOOKINGS policies
+drop policy if exists "Users can read own bookings" on public.bookings;
+drop policy if exists "Admins can read all bookings" on public.bookings;
+drop policy if exists "Users can create own bookings" on public.bookings;
+drop policy if exists "Users can update own bookings" on public.bookings;
+drop policy if exists "Admins can update all bookings" on public.bookings;
+drop policy if exists "Admins can delete bookings" on public.bookings;
+
 create policy "Users can read own bookings"
 on public.bookings
 for select
@@ -302,6 +314,11 @@ for delete
 using (public.is_admin());
 
 -- WASTE LOGS policies
+drop policy if exists "Authenticated users can read waste logs" on public.waste_logs;
+drop policy if exists "Admins can insert waste logs" on public.waste_logs;
+drop policy if exists "Admins can update waste logs" on public.waste_logs;
+drop policy if exists "Admins can delete waste logs" on public.waste_logs;
+
 create policy "Authenticated users can read waste logs"
 on public.waste_logs
 for select
