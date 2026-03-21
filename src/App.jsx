@@ -138,7 +138,8 @@ export default function App() {
     name: "",
     email: "",
     password: "",
-    role: "user"
+    role: "user",
+    adminKind: "hostel"
   });
 
   const [meals, setMeals] = useState([]);
@@ -186,6 +187,11 @@ export default function App() {
       return next;
     });
   }, [allUsers]);
+
+  useEffect(() => {
+    if (!profile?.admin_kind) return;
+    setHostelForm((prev) => ({ ...prev, kind: profile.admin_kind }));
+  }, [profile?.admin_kind]);
 
   useEffect(() => {
     if (!appLoading) return;
@@ -334,11 +340,12 @@ export default function App() {
       let lastError;
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const code = generateJoinCode();
+        const kind = profile?.admin_kind || hostelForm.kind;
         const { data, error } = await supabase
           .from("hostels")
           .insert({
             name,
-            kind: hostelForm.kind,
+            kind,
             join_code: code,
             created_by: session.user.id
           })
@@ -478,12 +485,16 @@ export default function App() {
         data: { session: activeSession }
       } = await supabase.auth.getSession();
       const email = activeSession?.user?.email || "";
-      const derivedName = (email.split("@")[0] || "user").trim() || "user";
+      const metadata = activeSession?.user?.user_metadata || {};
+      const derivedName = (metadata.name || email.split("@")[0] || "user").trim() || "user";
+      const derivedRole = metadata.role === "admin" ? "admin" : "user";
+      const derivedAdminKind = derivedRole === "admin" ? metadata.admin_kind || metadata.adminKind : null;
 
       const { error: insertError } = await supabase.from("users").insert({
         id: userId,
         name: derivedName,
-        role: "user"
+        role: derivedRole,
+        admin_kind: derivedAdminKind
       });
 
       if (insertError) {
@@ -558,10 +569,20 @@ export default function App() {
     setAuthError("");
 
     try {
+      const name = authForm.name?.trim() || "";
+      const adminKind = authForm.role === "admin" ? authForm.adminKind : null;
+
       const doSignup = async () =>
         await supabase.auth.signUp({
           email: authForm.email,
-          password: authForm.password
+          password: authForm.password,
+          options: {
+            data: {
+              name,
+              role: authForm.role,
+              admin_kind: adminKind
+            }
+          }
         });
 
       let { data, error } = await doSignup();
@@ -599,12 +620,14 @@ export default function App() {
       }
 
       if (data.user) {
-        const name = authForm.name?.trim() || (data.user.email ? data.user.email.split("@")[0] : "user");
+        const fallbackName = data.user.email ? data.user.email.split("@")[0] : "user";
+        const resolvedName = name || fallbackName;
 
         const { error: profileError } = await supabase.from("users").insert({
           id: data.user.id,
-          name,
-          role: "user"
+          name: resolvedName,
+          role: authForm.role,
+          admin_kind: adminKind
         });
 
         if (profileError) {
@@ -625,7 +648,7 @@ export default function App() {
     setAuthError("");
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: authForm.email,
         password: authForm.password
       });
@@ -636,6 +659,22 @@ export default function App() {
           setAuthCooldownUntil(Date.now() + 60_000);
         }
         setAuthError(formatSupabaseError(error, "Login failed."));
+      }
+
+      // If the user explicitly chose Admin login, fail fast for non-admin accounts.
+      if (authForm.role === "admin" && data?.user?.id) {
+        const { data: profileRow } = await supabase
+          .from("users")
+          .select("role")
+          .eq("id", data.user.id)
+          .maybeSingle();
+
+        if (profileRow && profileRow.role !== "admin") {
+          await supabase.auth.signOut();
+          setSession(null);
+          setProfile(null);
+          setAuthError("This account is not an admin. Select User login or use an admin account.");
+        }
       }
     } catch (error) {
       setAuthError(formatSupabaseError(error, "Login failed."));
@@ -904,6 +943,8 @@ export default function App() {
   }
 
   if (!session) {
+    const accountTypeValue = authForm.role === "admin" ? `admin:${authForm.adminKind}` : "user";
+
     return (
       <div className="min-h-screen bg-surface px-4 py-10 md:px-8">
         <div className="mx-auto max-w-5xl rounded-3xl bg-gradient-to-br from-moss to-ink p-8 text-white shadow-2xl md:p-10">
@@ -939,6 +980,31 @@ export default function App() {
                   onChange={(e) => setAuthForm((prev) => ({ ...prev, name: e.target.value }))}
                 />
               )}
+
+              <select
+                className="rounded-xl border border-stone-300 px-3 py-2"
+                value={accountTypeValue}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "user") {
+                    setAuthForm((prev) => ({ ...prev, role: "user" }));
+                    return;
+                  }
+
+                  if (value === "admin:hostel") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "hostel" }));
+                    return;
+                  }
+
+                  if (value === "admin:hotel") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "hotel" }));
+                  }
+                }}
+              >
+                <option value="user">User</option>
+                <option value="admin:hostel">Admin (Hostel)</option>
+                <option value="admin:hotel">Admin (Hotel)</option>
+              </select>
 
               <input
                 className="rounded-xl border border-stone-300 px-3 py-2"
@@ -1053,6 +1119,7 @@ export default function App() {
                 className="rounded-lg border border-stone-300 px-3 py-2"
                 value={hostelForm.kind}
                 onChange={(e) => setHostelForm((prev) => ({ ...prev, kind: e.target.value }))}
+                disabled={Boolean(profile?.admin_kind)}
               >
                 <option value="hostel">Hostel</option>
                 <option value="hotel">Hotel</option>

@@ -42,8 +42,12 @@ create table if not exists public.users (
   id uuid primary key references auth.users(id) on delete cascade,
   name text not null,
   role public.user_role not null default 'user',
+  admin_kind public.hostel_kind,
   created_at timestamptz not null default now()
 );
+
+alter table public.users
+  add column if not exists admin_kind public.hostel_kind;
 
 create table if not exists public.hostels (
   id uuid primary key default gen_random_uuid(),
