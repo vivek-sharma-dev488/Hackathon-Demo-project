@@ -7,12 +7,36 @@ create type public.meal_type as enum ('breakfast', 'lunch', 'dinner');
 create type public.portion_size as enum ('small', 'medium', 'large');
 create type public.booking_status as enum ('confirmed', 'cancelled');
 
+do $$
+begin
+  create type public.hostel_kind as enum ('hostel', 'hotel');
+exception
+  when duplicate_object then null;
+end $$;
+
 -- Core tables
 create table if not exists public.users (
   id uuid primary key references auth.users(id) on delete cascade,
   name text not null,
   role public.user_role not null default 'user',
   created_at timestamptz not null default now()
+);
+
+create table if not exists public.hostels (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  kind public.hostel_kind not null default 'hostel',
+  join_code text not null unique,
+  created_by uuid not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.hostel_memberships (
+  hostel_id uuid not null references public.hostels(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
+  role text not null default 'member' check (role in ('owner','member')),
+  created_at timestamptz not null default now(),
+  primary key (hostel_id, user_id)
 );
 
 create table if not exists public.meals (
@@ -57,6 +81,8 @@ alter table public.users enable row level security;
 alter table public.meals enable row level security;
 alter table public.bookings enable row level security;
 alter table public.waste_logs enable row level security;
+alter table public.hostels enable row level security;
+alter table public.hostel_memberships enable row level security;
 
 -- Helper function: checks if current auth user has admin role.
 create or replace function public.is_admin()
@@ -75,6 +101,12 @@ as $$
 $$;
 
 -- USERS policies
+drop policy if exists "Users can view own profile" on public.users;
+drop policy if exists "Users can insert own profile" on public.users;
+drop policy if exists "Users can update own profile" on public.users;
+drop policy if exists "Admins can view all profiles" on public.users;
+drop policy if exists "Admins can update all profiles" on public.users;
+
 create policy "Users can view own profile"
 on public.users
 for select
@@ -101,6 +133,92 @@ on public.users
 for update
 using (public.is_admin())
 with check (public.is_admin());
+
+-- HOSTELS policies
+drop policy if exists "Members can view hostels" on public.hostels;
+drop policy if exists "Admins can create hostels" on public.hostels;
+drop policy if exists "Admins can update hostels" on public.hostels;
+drop policy if exists "Admins can delete hostels" on public.hostels;
+
+create policy "Members can view hostels"
+on public.hostels
+for select
+using (
+  public.is_admin()
+  or created_by = auth.uid()
+  or exists (
+    select 1 from public.hostel_memberships m
+    where m.hostel_id = hostels.id
+      and m.user_id = auth.uid()
+  )
+);
+
+create policy "Admins can create hostels"
+on public.hostels
+for insert
+with check (public.is_admin() and created_by = auth.uid());
+
+create policy "Admins can update hostels"
+on public.hostels
+for update
+using (public.is_admin())
+with check (public.is_admin());
+
+create policy "Admins can delete hostels"
+on public.hostels
+for delete
+using (public.is_admin());
+
+-- HOSTEL MEMBERSHIPS policies
+drop policy if exists "Users can view own memberships" on public.hostel_memberships;
+drop policy if exists "Users can join a hostel" on public.hostel_memberships;
+drop policy if exists "Admins can view all memberships" on public.hostel_memberships;
+
+create policy "Users can view own memberships"
+on public.hostel_memberships
+for select
+using (user_id = auth.uid() or public.is_admin());
+
+create policy "Users can join a hostel"
+on public.hostel_memberships
+for insert
+with check (user_id = auth.uid());
+
+create policy "Admins can view all memberships"
+on public.hostel_memberships
+for select
+using (public.is_admin());
+
+-- Join RPC: user joins by join_code.
+create or replace function public.join_hostel(p_join_code text)
+returns public.hostels
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_hostel public.hostels;
+begin
+  if auth.uid() is null then
+    raise exception 'not authenticated';
+  end if;
+
+  select * into v_hostel
+  from public.hostels
+  where join_code = upper(trim(p_join_code))
+  limit 1;
+
+  if v_hostel.id is null then
+    raise exception 'invalid join code';
+  end if;
+
+  insert into public.hostel_memberships (hostel_id, user_id, role)
+  values (v_hostel.id, auth.uid(), 'member')
+  on conflict (hostel_id, user_id) do nothing;
+
+  return v_hostel;
+end;
+$$;
 
 -- MEALS policies
 create policy "Anyone authenticated can read meals"

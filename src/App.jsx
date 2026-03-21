@@ -38,13 +38,101 @@ function isBeforeDeadline(deadline) {
   return new Date() <= new Date(deadline);
 }
 
+function getErrorStatus(error) {
+  if (!error || typeof error !== "object") return null;
+  if (typeof error.status === "number") return error.status;
+  if (typeof error.code === "number") return error.code;
+  return null;
+}
+
+function formatSupabaseError(error, fallbackMessage = "Something went wrong.") {
+  if (!error) return fallbackMessage;
+  if (typeof error === "string") return error;
+
+  if (error?.name === "AbortError") {
+    return "Request timed out contacting Supabase. This is usually a network/VPN/firewall issue. Try a different network and retry.";
+  }
+
+  const status = getErrorStatus(error);
+  const message = typeof error.message === "string" ? error.message : "";
+  const code = typeof error.code === "string" ? error.code : "";
+
+  if (
+    code === "over_email_send_rate_limit" ||
+    /over_email_send_rate_limit/i.test(message)
+  ) {
+    return "Signup is being rate-limited because too many confirmation emails were sent. In Supabase: either disable email confirmation for testing, or configure Custom SMTP (Gmail/SendGrid/etc.), then wait 1-2 minutes and retry.";
+  }
+
+  if (status === 429 || /rate limit|too many/i.test(message)) {
+    return "Too many requests. Please wait a minute and try again.";
+  }
+
+  if (status === 504 || status === 503 || status === 502 || /gateway|timeout/i.test(message)) {
+    return "Supabase is taking too long to respond (gateway timeout). Check your internet/DNS and try again.";
+  }
+
+  if (/aborted|request timed out/i.test(message)) {
+    return "Request timed out contacting Supabase. This is usually a network/VPN/firewall issue. Try a different network and retry.";
+  }
+
+  if (/failed to fetch|networkerror|load failed|err_name_not_resolved|could not resolve/i.test(message)) {
+    return "Network error contacting Supabase. Check your internet/DNS and try again.";
+  }
+
+  return message || fallbackMessage;
+}
+
+function isRetryableReadError(error) {
+  const status = getErrorStatus(error);
+  if (status === 502 || status === 503 || status === 504) return true;
+  const message = typeof error?.message === "string" ? error.message : "";
+  return /failed to fetch|networkerror|timeout|gateway/i.test(message);
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(promise, ms, timeoutMessage = "Operation timed out") {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function retryRead(fn, { retries = 2, baseDelayMs = 400 } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableReadError(error) || attempt === retries) {
+        throw error;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [authMode, setAuthMode] = useState("login");
   const [authLoading, setAuthLoading] = useState(false);
+  const [logoutLoading, setLogoutLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const [appLoading, setAppLoading] = useState(true);
+  const [authCooldownUntil, setAuthCooldownUntil] = useState(0);
 
   const [authForm, setAuthForm] = useState({
     name: "",
@@ -56,6 +144,17 @@ export default function App() {
   const [meals, setMeals] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [wasteLogs, setWasteLogs] = useState([]);
+
+  const [allUsers, setAllUsers] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [roleDraftByUserId, setRoleDraftByUserId] = useState({});
+
+  const [membershipLoading, setMembershipLoading] = useState(false);
+  const [myMembership, setMyMembership] = useState(null);
+  const [myHostel, setMyHostel] = useState(null);
+  const [joinCode, setJoinCode] = useState("");
+  const [creatingHostel, setCreatingHostel] = useState(false);
+  const [hostelForm, setHostelForm] = useState({ name: "", kind: "hostel" });
 
   const [portionByMeal, setPortionByMeal] = useState({});
   const [mealForm, setMealForm] = useState({
@@ -73,17 +172,51 @@ export default function App() {
   });
 
   const isAdmin = profile?.role === "admin";
+  const authCooldownSeconds = Math.max(0, Math.ceil((authCooldownUntil - Date.now()) / 1000));
+  const isAuthCooldown = authCooldownSeconds > 0;
+
+  useEffect(() => {
+    setRoleDraftByUserId((prev) => {
+      const next = { ...prev };
+      for (const user of allUsers) {
+        if (!(user.id in next)) {
+          next[user.id] = user.role;
+        }
+      }
+      return next;
+    });
+  }, [allUsers]);
+
+  useEffect(() => {
+    if (!appLoading) return;
+    const watchdog = setTimeout(() => {
+      setAuthError(
+        "Loading timed out. This is usually caused by network/DNS issues reaching Supabase. Refresh and try again, or switch networks."
+      );
+      setAppLoading(false);
+    }, 15000);
+
+    return () => clearTimeout(watchdog);
+  }, [appLoading]);
 
   useEffect(() => {
     const initAuth = async () => {
-      const {
-        data: { session: activeSession }
-      } = await supabase.auth.getSession();
-      setSession(activeSession);
-      if (activeSession?.user) {
-        await loadProfile(activeSession.user.id);
+      try {
+        const {
+          data: { session: activeSession }
+        } = await withTimeout(supabase.auth.getSession(), 8000, "Auth initialization timed out");
+        setSession(activeSession);
+        if (activeSession?.user) {
+          await withTimeout(loadProfile(activeSession.user.id), 12000, "Profile load timed out");
+          setAuthError("");
+        } else {
+          setAuthError("");
+        }
+      } catch (error) {
+        setAuthError(formatSupabaseError(error, "Unable to initialize auth."));
+      } finally {
+        setAppLoading(false);
       }
-      setAppLoading(false);
     };
 
     initAuth();
@@ -92,10 +225,16 @@ export default function App() {
       data: { subscription }
     } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
       setSession(newSession);
-      if (newSession?.user) {
-        await loadProfile(newSession.user.id);
-      } else {
-        setProfile(null);
+      try {
+        if (newSession?.user) {
+          await loadProfile(newSession.user.id);
+          setAuthError("");
+        } else {
+          setProfile(null);
+          setAuthError("");
+        }
+      } catch (error) {
+        setAuthError(formatSupabaseError(error, "Auth state change failed."));
       }
     });
 
@@ -107,6 +246,7 @@ export default function App() {
       return;
     }
     void loadAllData();
+    void loadMembership();
 
     const channel = supabase
       .channel("meal-prebooking-realtime")
@@ -132,101 +272,396 @@ export default function App() {
     };
   }, [session?.user, profile?.role]);
 
-  async function loadProfile(userId) {
-    const { data, error } = await supabase.from("users").select("*").eq("id", userId).single();
-    if (error) {
-      setAuthError(error.message);
+  function generateJoinCode() {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let out = "";
+    for (let i = 0; i < 8; i += 1) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return out;
+  }
+
+  async function loadMembership() {
+    if (!session?.user) return;
+    setMembershipLoading(true);
+    try {
+      const { data, error } = await retryRead(
+        () =>
+          supabase
+            .from("hostel_memberships")
+            .select("role, created_at, hostels ( id, name, kind, join_code, created_by, created_at )")
+            .eq("user_id", session.user.id)
+            .order("created_at", { ascending: false })
+            .maybeSingle(),
+        { retries: 2 }
+      );
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to load hostel membership."));
+        return;
+      }
+
+      if (!data) {
+        setMyMembership(null);
+        setMyHostel(null);
+        return;
+      }
+
+      setMyMembership({ role: data.role, created_at: data.created_at });
+      setMyHostel(data.hostels || null);
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load hostel membership."));
+    } finally {
+      setMembershipLoading(false);
+    }
+  }
+
+  async function handleCreateHostel(e) {
+    e.preventDefault();
+    if (!isAdmin || !session?.user) return;
+
+    const name = hostelForm.name.trim();
+    if (!name) {
+      setAuthError("Enter a hostel/hotel name.");
       return;
     }
-    setProfile(data);
+
+    setCreatingHostel(true);
+    setAuthError("");
+
+    try {
+      let lastError;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const code = generateJoinCode();
+        const { data, error } = await supabase
+          .from("hostels")
+          .insert({
+            name,
+            kind: hostelForm.kind,
+            join_code: code,
+            created_by: session.user.id
+          })
+          .select("id, name, kind, join_code, created_by, created_at")
+          .single();
+
+        if (!error) {
+          // Ensure creator is also a member.
+          await supabase.from("hostel_memberships").upsert({
+            hostel_id: data.id,
+            user_id: session.user.id,
+            role: "owner"
+          });
+          setMyHostel(data);
+          setMyMembership({ role: "owner", created_at: new Date().toISOString() });
+          setHostelForm({ name: "", kind: hostelForm.kind });
+          return;
+        }
+
+        lastError = error;
+        // Retry if join_code collision.
+        if (!/duplicate key|unique constraint/i.test(error.message || "")) {
+          break;
+        }
+      }
+
+      setAuthError(formatSupabaseError(lastError, "Failed to create hostel/hotel."));
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to create hostel/hotel."));
+    } finally {
+      setCreatingHostel(false);
+    }
+  }
+
+  async function handleJoinHostel(e) {
+    e.preventDefault();
+    if (!session?.user) return;
+    const code = joinCode.trim().toUpperCase();
+    if (!code) {
+      setAuthError("Enter a join code.");
+      return;
+    }
+
+    setMembershipLoading(true);
+    setAuthError("");
+    try {
+      const { data, error } = await supabase.rpc("join_hostel", { p_join_code: code });
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel."));
+        return;
+      }
+
+      if (data) {
+        setMyHostel(data);
+      }
+      setJoinCode("");
+      await loadMembership();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel."));
+    } finally {
+      setMembershipLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!isAdmin || !session?.user) return;
+    void loadUsers();
+  }, [isAdmin, session?.user]);
+
+  async function loadUsers() {
+    if (!session?.user || !isAdmin) return;
+    setUsersLoading(true);
+    try {
+      const { data, error } = await retryRead(
+        () => supabase.from("users").select("id,name,role,created_at").order("created_at", { ascending: false }),
+        { retries: 2 }
+      );
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to load users."));
+        return;
+      }
+
+      setAllUsers(data || []);
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load users."));
+    } finally {
+      setUsersLoading(false);
+    }
+  }
+
+  async function updateUserRole(userId, newRole) {
+    if (!isAdmin) return;
+    try {
+      const { error } = await supabase.from("users").update({ role: newRole }).eq("id", userId);
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to update user role."));
+        return;
+      }
+
+      setAllUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to update user role."));
+    }
+  }
+
+  async function loadProfile(userId) {
+    try {
+      const { data, error } = await retryRead(
+        () => supabase.from("users").select("*").eq("id", userId).maybeSingle(),
+        { retries: 2 }
+      );
+
+      if (error) {
+        const status = getErrorStatus(error);
+        if (status === 401) {
+          setAuthError("Session expired or unauthorized. Please login again.");
+          await supabase.auth.signOut();
+          setSession(null);
+          setProfile(null);
+          return;
+        }
+        setAuthError(formatSupabaseError(error, "Failed to load profile."));
+        return;
+      }
+
+      if (data) {
+        setProfile(data);
+        setAuthError("");
+        return;
+      }
+
+      // Profile row is missing (common when signup/profile insert failed or the DB wasn't initialized).
+      const {
+        data: { session: activeSession }
+      } = await supabase.auth.getSession();
+      const email = activeSession?.user?.email || "";
+      const derivedName = (email.split("@")[0] || "user").trim() || "user";
+
+      const { error: insertError } = await supabase.from("users").insert({
+        id: userId,
+        name: derivedName,
+        role: "user"
+      });
+
+      if (insertError) {
+        setAuthError(
+          formatSupabaseError(
+            insertError,
+            "Your profile is not set up in the database. Run the SQL schema and try again."
+          )
+        );
+        return;
+      }
+
+      const { data: createdProfile, error: createdError } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (createdError) {
+        setAuthError(formatSupabaseError(createdError, "Profile created, but could not be loaded."));
+        return;
+      }
+
+      setProfile(createdProfile);
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load profile."));
+    }
   }
 
   async function loadAllData() {
     setAppLoading(true);
+    try {
+      const mealsQuery = () => supabase.from("meals").select("*").order("date", { ascending: true });
 
-    const mealsQuery = supabase.from("meals").select("*").order("date", { ascending: true });
+      const bookingsQuery = () =>
+        isAdmin
+          ? supabase.from("bookings").select("*")
+          : supabase.from("bookings").select("*").eq("user_id", session.user.id);
 
-    const bookingsQuery = isAdmin
-      ? supabase.from("bookings").select("*")
-      : supabase.from("bookings").select("*").eq("user_id", session.user.id);
+      const wasteQuery = () =>
+        isAdmin
+          ? supabase.from("waste_logs").select("*").order("date", { ascending: true })
+          : supabase.from("waste_logs").select("*").order("date", { ascending: true });
 
-    const wasteQuery = isAdmin
-      ? supabase.from("waste_logs").select("*").order("date", { ascending: true })
-      : supabase
-          .from("waste_logs")
-          .select("*")
-          .order("date", { ascending: true });
+      const [{ data: mealsData, error: mealsError }, { data: bookingsData, error: bookingsError }, { data: wasteData, error: wasteError }] =
+        await retryRead(() => Promise.all([mealsQuery(), bookingsQuery(), wasteQuery()]), { retries: 2 });
 
-    const [{ data: mealsData, error: mealsError }, { data: bookingsData, error: bookingsError }, { data: wasteData, error: wasteError }] =
-      await Promise.all([mealsQuery, bookingsQuery, wasteQuery]);
+      if (mealsError || bookingsError || wasteError) {
+        setAuthError(
+          formatSupabaseError(mealsError || bookingsError || wasteError, "Failed to load dashboard data.")
+        );
+        setAppLoading(false);
+        return;
+      }
 
-    if (mealsError || bookingsError || wasteError) {
-      setAuthError(mealsError?.message || bookingsError?.message || wasteError?.message || "Failed to load data");
+      setMeals(mealsData || []);
+      setBookings(bookingsData || []);
+      setWasteLogs(wasteData || []);
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load dashboard data."));
+    } finally {
       setAppLoading(false);
-      return;
     }
-
-    setMeals(mealsData || []);
-    setBookings(bookingsData || []);
-    setWasteLogs(wasteData || []);
-    setAppLoading(false);
   }
 
   async function handleSignup(e) {
     e.preventDefault();
+    if (authLoading || isAuthCooldown) return;
     setAuthLoading(true);
     setAuthError("");
 
-    const { data, error } = await supabase.auth.signUp({
-      email: authForm.email,
-      password: authForm.password
-    });
+    try {
+      const doSignup = async () =>
+        await supabase.auth.signUp({
+          email: authForm.email,
+          password: authForm.password
+        });
 
-    if (error) {
-      setAuthError(error.message);
-      setAuthLoading(false);
-      return;
-    }
+      let { data, error } = await doSignup();
 
-    if (data.user) {
-      const { error: profileError } = await supabase.from("users").insert({
-        id: data.user.id,
-        name: authForm.name,
-        role: authForm.role
-      });
-
-      if (profileError) {
-        setAuthError(profileError.message);
+      const firstStatus = getErrorStatus(error);
+      if (error && (firstStatus === 502 || firstStatus === 503 || firstStatus === 504)) {
+        await sleep(800);
+        ({ data, error } = await doSignup());
       }
-    }
 
-    setAuthLoading(false);
+      if (error) {
+        const status = getErrorStatus(error);
+        if (status === 429) {
+          setAuthCooldownUntil(Date.now() + 60_000);
+        }
+        const message = formatSupabaseError(error, "Signup failed.");
+        if (status === 502 || status === 503 || status === 504) {
+          setAuthError(`${message} If you already clicked once, the account might have been created—try Login.`);
+        } else {
+          setAuthError(message);
+        }
+        setAuthLoading(false);
+        return;
+      }
+
+      // If email confirmation is enabled, Supabase may return `user` without a session.
+      // In that case, PostgREST requests will be anonymous and inserts will fail (401/RLS).
+      if (!data.session) {
+        setAuthError(
+          "Account created. Check your email to confirm, then login. Your profile will be created automatically on first login."
+        );
+        setAuthLoading(false);
+        setAuthMode("login");
+        return;
+      }
+
+      if (data.user) {
+        const name = authForm.name?.trim() || (data.user.email ? data.user.email.split("@")[0] : "user");
+
+        const { error: profileError } = await supabase.from("users").insert({
+          id: data.user.id,
+          name,
+          role: "user"
+        });
+
+        if (profileError) {
+          setAuthError(formatSupabaseError(profileError, "Profile creation failed."));
+        }
+      }
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Signup failed."));
+    } finally {
+      setAuthLoading(false);
+    }
   }
 
   async function handleLogin(e) {
     e.preventDefault();
+    if (authLoading || isAuthCooldown) return;
     setAuthLoading(true);
     setAuthError("");
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: authForm.email,
-      password: authForm.password
-    });
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authForm.email,
+        password: authForm.password
+      });
 
-    if (error) {
-      setAuthError(error.message);
+      if (error) {
+        const status = getErrorStatus(error);
+        if (status === 429) {
+          setAuthCooldownUntil(Date.now() + 60_000);
+        }
+        setAuthError(formatSupabaseError(error, "Login failed."));
+      }
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Login failed."));
+    } finally {
+      setAuthLoading(false);
     }
-
-    setAuthLoading(false);
   }
 
   async function handleLogout() {
-    await supabase.auth.signOut();
-    setSession(null);
-    setProfile(null);
-    setBookings([]);
-    setMeals([]);
-    setWasteLogs([]);
+    if (logoutLoading) return;
+    setLogoutLoading(true);
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Always clear local state even if network signOut fails.
+    } finally {
+      setSession(null);
+      setProfile(null);
+      setBookings([]);
+      setMeals([]);
+      setWasteLogs([]);
+      setAllUsers([]);
+      setMyMembership(null);
+      setMyHostel(null);
+      setLogoutLoading(false);
+    }
   }
 
   async function handleBookMeal(mealId) {
@@ -242,42 +677,55 @@ export default function App() {
       return;
     }
 
-    const { data: existing } = await supabase
-      .from("bookings")
-      .select("id")
-      .eq("user_id", session.user.id)
-      .eq("meal_id", mealId)
-      .eq("status", "confirmed")
-      .maybeSingle();
+    try {
+      const { data: existing, error: existingError } = await supabase
+        .from("bookings")
+        .select("id")
+        .eq("user_id", session.user.id)
+        .eq("meal_id", mealId)
+        .eq("status", "confirmed")
+        .maybeSingle();
 
-    if (existing) {
-      setAuthError("You already have a confirmed booking for this meal.");
-      return;
+      if (existingError) {
+        setAuthError(formatSupabaseError(existingError, "Failed to check existing bookings."));
+        return;
+      }
+
+      if (existing) {
+        setAuthError("You already have a confirmed booking for this meal.");
+        return;
+      }
+
+      const { error } = await supabase.from("bookings").insert({
+        user_id: session.user.id,
+        meal_id: mealId,
+        portion_size: selectedPortion,
+        status: "confirmed"
+      });
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Booking failed."));
+        return;
+      }
+
+      setAuthError("");
+      await loadAllData();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Booking failed."));
     }
-
-    const { error } = await supabase.from("bookings").insert({
-      user_id: session.user.id,
-      meal_id: mealId,
-      portion_size: selectedPortion,
-      status: "confirmed"
-    });
-
-    if (error) {
-      setAuthError(error.message);
-      return;
-    }
-
-    setAuthError("");
-    await loadAllData();
   }
 
   async function handleCancelBooking(bookingId) {
-    const { error } = await supabase.from("bookings").update({ status: "cancelled" }).eq("id", bookingId);
-    if (error) {
-      setAuthError(error.message);
-      return;
+    try {
+      const { error } = await supabase.from("bookings").update({ status: "cancelled" }).eq("id", bookingId);
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Cancellation failed."));
+        return;
+      }
+      await loadAllData();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Cancellation failed."));
     }
-    await loadAllData();
   }
 
   async function handleSaveMeal(e) {
@@ -293,9 +741,14 @@ export default function App() {
       ? supabase.from("meals").update(payload).eq("id", mealForm.id)
       : supabase.from("meals").insert(payload);
 
-    const { error } = await query;
-    if (error) {
-      setAuthError(error.message);
+    try {
+      const { error } = await query;
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to save meal."));
+        return;
+      }
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to save meal."));
       return;
     }
 
@@ -320,12 +773,16 @@ export default function App() {
   }
 
   async function deleteMeal(mealId) {
-    const { error } = await supabase.from("meals").delete().eq("id", mealId);
-    if (error) {
-      setAuthError(error.message);
-      return;
+    try {
+      const { error } = await supabase.from("meals").delete().eq("id", mealId);
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to delete meal."));
+        return;
+      }
+      await loadAllData();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to delete meal."));
     }
-    await loadAllData();
   }
 
   async function saveWasteLog(e) {
@@ -343,25 +800,34 @@ export default function App() {
       date: wasteForm.date
     };
 
-    const { data: existing } = await supabase
-      .from("waste_logs")
-      .select("id")
-      .eq("meal_id", wasteForm.meal_id)
-      .eq("date", wasteForm.date)
-      .maybeSingle();
+    try {
+      const { data: existing, error: existingError } = await supabase
+        .from("waste_logs")
+        .select("id")
+        .eq("meal_id", wasteForm.meal_id)
+        .eq("date", wasteForm.date)
+        .maybeSingle();
 
-    const query = existing
-      ? supabase.from("waste_logs").update(payload).eq("id", existing.id)
-      : supabase.from("waste_logs").insert(payload);
+      if (existingError) {
+        setAuthError(formatSupabaseError(existingError, "Failed to check existing waste log."));
+        return;
+      }
 
-    const { error } = await query;
-    if (error) {
-      setAuthError(error.message);
-      return;
+      const query = existing
+        ? supabase.from("waste_logs").update(payload).eq("id", existing.id)
+        : supabase.from("waste_logs").insert(payload);
+
+      const { error } = await query;
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to save waste log."));
+        return;
+      }
+
+      setWasteForm({ meal_id: "", prepared_quantity: "", consumed_quantity: "", date: "" });
+      await loadAllData();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to save waste log."));
     }
-
-    setWasteForm({ meal_id: "", prepared_quantity: "", consumed_quantity: "", date: "" });
-    await loadAllData();
   }
 
   const mealBookingStats = useMemo(() => {
@@ -492,19 +958,17 @@ export default function App() {
                 onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
               />
 
-              {authMode === "signup" && (
-                <select
-                  className="rounded-xl border border-stone-300 px-3 py-2"
-                  value={authForm.role}
-                  onChange={(e) => setAuthForm((prev) => ({ ...prev, role: e.target.value }))}
-                >
-                  <option value="user">User</option>
-                  <option value="admin">Admin</option>
-                </select>
-              )}
-
-              <button className="rounded-xl bg-coral px-4 py-2 font-semibold text-white" disabled={authLoading}>
-                {authLoading ? "Please wait..." : authMode === "signup" ? "Create account" : "Login"}
+              <button
+                className="rounded-xl bg-coral px-4 py-2 font-semibold text-white disabled:opacity-70"
+                disabled={authLoading || isAuthCooldown}
+              >
+                {authLoading
+                  ? "Please wait..."
+                  : isAuthCooldown
+                    ? `Try again in ${authCooldownSeconds}s`
+                    : authMode === "signup"
+                      ? "Create account"
+                      : "Login"}
               </button>
               {authError && <p className="text-sm text-red-600">{authError}</p>}
             </form>
@@ -523,12 +987,85 @@ export default function App() {
             Signed in as <span className="font-semibold">{profile?.name || session.user.email}</span> ({profile?.role})
           </p>
         </div>
-        <button onClick={handleLogout} className="rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white">
-          Logout
+        <button
+          onClick={handleLogout}
+          disabled={logoutLoading}
+          className="rounded-xl bg-ink px-4 py-2 text-sm font-semibold text-white disabled:opacity-70"
+        >
+          {logoutLoading ? "Logging out..." : "Logout"}
         </button>
       </header>
 
       <main className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-2">
+        <section className="rounded-2xl bg-white p-5 shadow lg:col-span-2">
+          <h2 className="text-xl font-bold">Hostel / Hotel</h2>
+
+          {membershipLoading ? (
+            <p className="mt-2 text-sm text-stone-600">Loading membership...</p>
+          ) : myHostel ? (
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              <div className="rounded-xl border border-stone-200 p-4">
+                <p className="text-sm text-stone-600">You are part of</p>
+                <p className="mt-1 text-lg font-semibold">{myHostel.name}</p>
+                <p className="mt-1 text-xs text-stone-500">
+                  Type: {myHostel.kind} | Your role: {myMembership?.role || "member"}
+                </p>
+              </div>
+
+              {isAdmin && myHostel.join_code && (
+                <div className="rounded-xl border border-stone-200 p-4">
+                  <p className="text-sm text-stone-600">Share this join code</p>
+                  <p className="mt-1 font-mono text-lg font-semibold tracking-wider">{myHostel.join_code}</p>
+                  <p className="mt-1 text-xs text-stone-500">Users can join using this code.</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-stone-600">You haven't joined any hostel/hotel yet.</p>
+          )}
+
+          {!isAdmin && !myHostel && (
+            <form className="mt-4 flex flex-col gap-2 md:flex-row" onSubmit={handleJoinHostel}>
+              <input
+                className="flex-1 rounded-lg border border-stone-300 px-3 py-2"
+                placeholder="Enter join code"
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value)}
+              />
+              <button
+                className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white disabled:opacity-70"
+                disabled={membershipLoading}
+              >
+                {membershipLoading ? "Joining..." : "Join"}
+              </button>
+            </form>
+          )}
+
+          {isAdmin && !myHostel && (
+            <form className="mt-4 grid gap-2 md:grid-cols-3" onSubmit={handleCreateHostel}>
+              <input
+                className="rounded-lg border border-stone-300 px-3 py-2 md:col-span-2"
+                placeholder="Hostel/Hotel name"
+                value={hostelForm.name}
+                onChange={(e) => setHostelForm((prev) => ({ ...prev, name: e.target.value }))}
+              />
+              <select
+                className="rounded-lg border border-stone-300 px-3 py-2"
+                value={hostelForm.kind}
+                onChange={(e) => setHostelForm((prev) => ({ ...prev, kind: e.target.value }))}
+              >
+                <option value="hostel">Hostel</option>
+                <option value="hotel">Hotel</option>
+              </select>
+              <button
+                className="rounded-lg bg-moss px-4 py-2 text-sm font-semibold text-white disabled:opacity-70 md:col-span-3"
+                disabled={creatingHostel}
+              >
+                {creatingHostel ? "Creating..." : "Create"}
+              </button>
+            </form>
+          )}
+        </section>
         <section className="rounded-2xl bg-white p-5 shadow">
           <h2 className="text-xl font-bold">Upcoming Meals</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
@@ -823,6 +1360,86 @@ export default function App() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="rounded-2xl bg-white p-5 shadow">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <h2 className="text-xl font-bold">User Management</h2>
+                <button
+                  type="button"
+                  onClick={loadUsers}
+                  className="rounded-lg bg-ink px-4 py-2 text-sm font-semibold text-white disabled:opacity-70"
+                  disabled={usersLoading}
+                >
+                  {usersLoading ? "Refreshing..." : "Refresh users"}
+                </button>
+              </div>
+
+              <p className="mt-2 text-sm text-stone-600">
+                Promote or demote users by changing their role. This requires the admin RLS policies from the provided SQL schema.
+              </p>
+
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-stone-200 text-stone-600">
+                      <th className="py-2">Name</th>
+                      <th className="py-2">Role</th>
+                      <th className="py-2">Created</th>
+                      <th className="py-2">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {allUsers.map((user) => {
+                      const draftRole = roleDraftByUserId[user.id] || user.role;
+                      const isSelf = user.id === session?.user?.id;
+
+                      return (
+                        <tr key={user.id} className="border-b border-stone-100">
+                          <td className="py-2">
+                            <div className="font-semibold">{user.name}</div>
+                            {isSelf && <div className="text-xs text-stone-500">This is you</div>}
+                          </td>
+                          <td className="py-2">
+                            <select
+                              className="rounded-lg border border-stone-300 px-3 py-1"
+                              value={draftRole}
+                              onChange={(e) =>
+                                setRoleDraftByUserId((prev) => ({
+                                  ...prev,
+                                  [user.id]: e.target.value
+                                }))
+                              }
+                            >
+                              <option value="user">User</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
+                          <td className="py-2 text-stone-600">{user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</td>
+                          <td className="py-2">
+                            <button
+                              type="button"
+                              className="rounded-lg bg-moss px-3 py-1 text-xs font-semibold text-white disabled:opacity-70"
+                              disabled={draftRole === user.role}
+                              onClick={() => updateUserRole(user.id, draftRole)}
+                            >
+                              Save
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {!usersLoading && !allUsers.length && (
+                      <tr>
+                        <td className="py-3 text-stone-500" colSpan={4}>
+                          No users found (or you don’t have permission to list users).
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
