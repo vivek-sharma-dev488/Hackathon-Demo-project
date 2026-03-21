@@ -2,10 +2,33 @@
 create extension if not exists "pgcrypto";
 
 -- Enums
-create type public.user_role as enum ('admin', 'user');
-create type public.meal_type as enum ('breakfast', 'lunch', 'dinner');
-create type public.portion_size as enum ('small', 'medium', 'large');
-create type public.booking_status as enum ('confirmed', 'cancelled');
+do $$
+begin
+  create type public.user_role as enum ('admin', 'user');
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.meal_type as enum ('breakfast', 'lunch', 'dinner');
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.portion_size as enum ('small', 'medium', 'large');
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  create type public.booking_status as enum ('confirmed', 'cancelled');
+exception
+  when duplicate_object then null;
+end $$;
 
 do $$
 begin
