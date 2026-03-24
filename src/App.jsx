@@ -455,13 +455,13 @@ export default function App() {
       );
 
       if (error) {
-        setAuthError(formatSupabaseError(error, "Failed to load NGOs."));
+        setAuthError(formatSupabaseError(error, "Failed to load biodegradable companies."));
         return;
       }
 
       setNgos(data || []);
     } catch (error) {
-      setAuthError(formatSupabaseError(error, "Failed to load NGOs."));
+      setAuthError(formatSupabaseError(error, "Failed to load biodegradable companies."));
     } finally {
       setNgosLoading(false);
     }
@@ -473,7 +473,7 @@ export default function App() {
 
     const name = ngoForm.name.trim();
     if (!name) {
-      setAuthError("Enter NGO name.");
+      setAuthError("Enter biodegradable company name.");
       return;
     }
 
@@ -487,7 +487,7 @@ export default function App() {
       });
 
       if (error) {
-        setAuthError(formatSupabaseError(error, "Failed to create NGO."));
+        setAuthError(formatSupabaseError(error, "Failed to create biodegradable company."));
         return;
       }
 
@@ -495,7 +495,7 @@ export default function App() {
       setAuthError("");
       await loadNgos();
     } catch (error) {
-      setAuthError(formatSupabaseError(error, "Failed to create NGO."));
+      setAuthError(formatSupabaseError(error, "Failed to create biodegradable company."));
     }
   }
 
@@ -504,13 +504,13 @@ export default function App() {
     try {
       const { error } = await supabase.from("ngos").delete().eq("id", ngoId);
       if (error) {
-        setAuthError(formatSupabaseError(error, "Failed to delete NGO."));
+        setAuthError(formatSupabaseError(error, "Failed to delete biodegradable company."));
         return;
       }
       setAuthError("");
       setNgos((prev) => prev.filter((ngo) => ngo.id !== ngoId));
     } catch (error) {
-      setAuthError(formatSupabaseError(error, "Failed to delete NGO."));
+      setAuthError(formatSupabaseError(error, "Failed to delete biodegradable company."));
     }
   }
 
@@ -588,7 +588,9 @@ export default function App() {
 
       const { data: targetNgos, error: targetError } = await ngoQuery;
       if (targetError) {
-        setAuthError(formatSupabaseError(targetError, "Notification created, but NGOs could not be loaded."));
+        setAuthError(
+          formatSupabaseError(targetError, "Notification created, but biodegradable companies could not be loaded.")
+        );
         await loadFoodNotifications();
         return;
       }
@@ -602,7 +604,10 @@ export default function App() {
         const { error: targetInsertError } = await supabase.from("food_notification_targets").insert(targets);
         if (targetInsertError) {
           setAuthError(
-            formatSupabaseError(targetInsertError, "Notification created, but could not create NGO targets.")
+            formatSupabaseError(
+              targetInsertError,
+              "Notification created, but could not create biodegradable company targets."
+            )
           );
           await loadFoodNotifications();
           return;
@@ -611,7 +616,7 @@ export default function App() {
 
       setFoodNotificationForm({ remaining_portions: "", area: "", notes: "" });
       setFoodNotificationNotice(
-        `Notification sent. Matched ${targets.length} NGO${targets.length === 1 ? "" : "s"}${area ? ` near \"${area}\"` : ""}.`
+        `Notification sent. Matched ${targets.length} biodegradable compan${targets.length === 1 ? "y" : "ies"}${area ? ` near \"${area}\"` : ""}.`
       );
 
       await loadFoodNotifications();
@@ -1658,7 +1663,7 @@ export default function App() {
 
             <section className="rounded-2xl bg-white p-5 shadow lg:col-span-2">
               <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                <h2 className="text-xl font-bold">NGO & Remaining Food Notifications</h2>
+                <h2 className="text-xl font-bold">Biodegradable Companies & Food Wastage Notifications</h2>
                 <button
                   type="button"
                   onClick={() => {
@@ -1674,18 +1679,18 @@ export default function App() {
 
               <div className="mt-4 grid gap-6 lg:grid-cols-2">
                 <div className="rounded-xl border border-stone-200 p-4">
-                  <h3 className="text-sm font-bold">Add NGO (Admin only)</h3>
+                  <h3 className="text-sm font-bold">Add Biodegradable Company (Admin only)</h3>
                   <form className="mt-3 grid gap-2" onSubmit={createNgo}>
                     <input
                       className="rounded-lg border border-stone-300 px-3 py-2"
-                      placeholder="NGO name"
+                      placeholder="Company name"
                       value={ngoForm.name}
                       onChange={(e) => setNgoForm((prev) => ({ ...prev, name: e.target.value }))}
                       required
                     />
                     <input
                       className="rounded-lg border border-stone-300 px-3 py-2"
-                      placeholder="Area / locality (for nearby matching)"
+                      placeholder="Service area / locality (for nearby matching)"
                       value={ngoForm.area}
                       onChange={(e) => setNgoForm((prev) => ({ ...prev, area: e.target.value }))}
                     />
@@ -1704,12 +1709,12 @@ export default function App() {
                         onChange={(e) => setNgoForm((prev) => ({ ...prev, email: e.target.value }))}
                       />
                     </div>
-                    <button className="rounded-lg bg-moss px-4 py-2 text-sm font-semibold text-white">Create NGO</button>
+                    <button className="rounded-lg bg-moss px-4 py-2 text-sm font-semibold text-white">Add Company</button>
                   </form>
 
                   <div className="mt-4">
                     <div className="flex items-center justify-between">
-                      <h4 className="text-sm font-semibold">NGO List</h4>
+                      <h4 className="text-sm font-semibold">Biodegradable Companies</h4>
                       {ngosLoading && <span className="text-xs text-stone-500">Loading...</span>}
                     </div>
                     <div className="mt-2 space-y-2">
@@ -1718,7 +1723,7 @@ export default function App() {
                           <div>
                             <div className="text-sm font-semibold">{ngo.name}</div>
                             <div className="text-xs text-stone-600">
-                              {ngo.area ? `Area: ${ngo.area}` : "Area: -"}
+                              {ngo.area ? `Service area: ${ngo.area}` : "Service area: -"}
                               {ngo.phone ? ` | Phone: ${ngo.phone}` : ""}
                               {ngo.email ? ` | Email: ${ngo.email}` : ""}
                             </div>
@@ -1732,15 +1737,18 @@ export default function App() {
                           </button>
                         </div>
                       ))}
-                      {!ngosLoading && !ngos.length && <p className="text-sm text-stone-500">No NGOs added yet.</p>}
+                      {!ngosLoading && !ngos.length && (
+                        <p className="text-sm text-stone-500">No biodegradable companies added yet.</p>
+                      )}
                     </div>
                   </div>
                 </div>
 
                 <div className="rounded-xl border border-stone-200 p-4">
-                  <h3 className="text-sm font-bold">Send Remaining Food Notification</h3>
+                  <h3 className="text-sm font-bold">Send Food Wastage Conversion Notification</h3>
                   <p className="mt-1 text-xs text-stone-600">
-                    Sends an in-app notification to NGOs whose area matches (case-insensitive). Leave area blank to notify all NGOs.
+                    Sends an in-app notification to biodegradable companies that use food wastage to produce
+                    pesticides and fertilizers. Leave area blank to notify all companies.
                   </p>
 
                   <form className="mt-3 grid gap-2" onSubmit={sendFoodRemainingNotification}>
@@ -1758,17 +1766,19 @@ export default function App() {
                     />
                     <input
                       className="rounded-lg border border-stone-300 px-3 py-2"
-                      placeholder='Area / locality (e.g. "Andheri" or "Sector 5")'
+                      placeholder='Area / locality (e.g. "Andheri" or "Sector 5") for nearby companies'
                       value={foodNotificationForm.area}
                       onChange={(e) => setFoodNotificationForm((prev) => ({ ...prev, area: e.target.value }))}
                     />
                     <textarea
                       className="min-h-24 rounded-lg border border-stone-300 px-3 py-2"
-                      placeholder="Notes (optional: what food, pickup time, etc.)"
+                      placeholder="Notes (optional: food type, pickup window, moisture level, etc.)"
                       value={foodNotificationForm.notes}
                       onChange={(e) => setFoodNotificationForm((prev) => ({ ...prev, notes: e.target.value }))}
                     />
-                    <button className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white">Send to NGOs</button>
+                    <button className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white">
+                      Send to Companies
+                    </button>
                     {foodNotificationNotice && <p className="text-xs text-moss">{foodNotificationNotice}</p>}
                   </form>
 
@@ -1788,12 +1798,16 @@ export default function App() {
                           <div key={n.id} className="rounded-lg bg-stone-50 p-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <div className="text-sm font-semibold">
-                                {n.hostels?.name ? `${n.hostels.name} (${n.hostels.kind})` : "Source"} → {targetCount} NGO{targetCount === 1 ? "" : "s"}
+                                {n.hostels?.name ? `${n.hostels.name} (${n.hostels.kind})` : "Source"} → {targetCount}
+                                {" "}
+                                compan{targetCount === 1 ? "y" : "ies"}
                               </div>
                               <div className="text-xs text-stone-600">{n.created_at ? formatDateTime(n.created_at) : ""}</div>
                             </div>
                             <div className="mt-1 text-xs text-stone-700">
-                              Remaining: <span className="font-semibold">{n.remaining_portions}</span> portions
+                              Available food wastage: <span className="font-semibold">{n.remaining_portions}</span>
+                              {" "}
+                              portions
                               {n.area ? ` | Area: ${n.area}` : ""}
                             </div>
                             {n.notes && <div className="mt-1 text-xs text-stone-600">{n.notes}</div>}
