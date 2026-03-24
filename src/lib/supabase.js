@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 12000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
 async function fetchWithTimeout(input, init = {}) {
   const controller = new AbortController();

@@ -32,9 +32,16 @@ end $$;
 
 do $$
 begin
-  create type public.hostel_kind as enum ('hostel', 'hotel');
+  create type public.hostel_kind as enum ('hostel', 'hotel', 'restaurant');
 exception
   when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter type public.hostel_kind add value if not exists 'restaurant';
+exception
+  when undefined_object then null;
 end $$;
 
 -- Core tables
@@ -97,11 +104,41 @@ create table if not exists public.waste_logs (
   unique(meal_id, date)
 );
 
+-- NGOs + remaining food notifications
+create table if not exists public.ngos (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  area text,
+  phone text,
+  email text,
+  created_by uuid references public.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.food_remaining_notifications (
+  id uuid primary key default gen_random_uuid(),
+  hostel_id uuid not null references public.hostels(id) on delete cascade,
+  created_by uuid not null references public.users(id) on delete cascade,
+  remaining_portions integer not null check (remaining_portions >= 0),
+  area text,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.food_notification_targets (
+  notification_id uuid not null references public.food_remaining_notifications(id) on delete cascade,
+  ngo_id uuid not null references public.ngos(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (notification_id, ngo_id)
+);
+
 -- Helpful indexes
 create index if not exists idx_bookings_user_id on public.bookings(user_id);
 create index if not exists idx_bookings_meal_id on public.bookings(meal_id);
 create index if not exists idx_meals_date on public.meals(date);
 create index if not exists idx_waste_logs_date on public.waste_logs(date);
+create index if not exists idx_ngos_created_at on public.ngos(created_at);
+create index if not exists idx_food_remaining_notifications_created_at on public.food_remaining_notifications(created_at);
 
 -- Enable row-level security
 alter table public.users enable row level security;
@@ -110,6 +147,9 @@ alter table public.bookings enable row level security;
 alter table public.waste_logs enable row level security;
 alter table public.hostels enable row level security;
 alter table public.hostel_memberships enable row level security;
+alter table public.ngos enable row level security;
+alter table public.food_remaining_notifications enable row level security;
+alter table public.food_notification_targets enable row level security;
 
 -- Helper function: checks if current auth user has admin role.
 create or replace function public.is_admin()
@@ -341,6 +381,73 @@ with check (public.is_admin());
 
 create policy "Admins can delete waste logs"
 on public.waste_logs
+for delete
+using (public.is_admin());
+
+-- NGOS policies (admin-only)
+drop policy if exists "Admins can read NGOs" on public.ngos;
+drop policy if exists "Admins can insert NGOs" on public.ngos;
+drop policy if exists "Admins can update NGOs" on public.ngos;
+drop policy if exists "Admins can delete NGOs" on public.ngos;
+
+create policy "Admins can read NGOs"
+on public.ngos
+for select
+using (public.is_admin());
+
+create policy "Admins can insert NGOs"
+on public.ngos
+for insert
+with check (public.is_admin());
+
+create policy "Admins can update NGOs"
+on public.ngos
+for update
+using (public.is_admin())
+with check (public.is_admin());
+
+create policy "Admins can delete NGOs"
+on public.ngos
+for delete
+using (public.is_admin());
+
+-- Remaining food notifications policies (admin-only)
+drop policy if exists "Admins can read remaining food notifications" on public.food_remaining_notifications;
+drop policy if exists "Admins can insert remaining food notifications" on public.food_remaining_notifications;
+drop policy if exists "Admins can delete remaining food notifications" on public.food_remaining_notifications;
+
+create policy "Admins can read remaining food notifications"
+on public.food_remaining_notifications
+for select
+using (public.is_admin());
+
+create policy "Admins can insert remaining food notifications"
+on public.food_remaining_notifications
+for insert
+with check (public.is_admin() and created_by = auth.uid());
+
+create policy "Admins can delete remaining food notifications"
+on public.food_remaining_notifications
+for delete
+using (public.is_admin());
+
+-- Notification targets policies (admin-only)
+drop policy if exists "Admins can read food notification targets" on public.food_notification_targets;
+drop policy if exists "Admins can insert food notification targets" on public.food_notification_targets;
+drop policy if exists "Admins can delete food notification targets" on public.food_notification_targets;
+
+create policy "Admins can read food notification targets"
+on public.food_notification_targets
+for select
+using (public.is_admin());
+
+create policy "Admins can insert food notification targets"
+on public.food_notification_targets
+for insert
+with check (public.is_admin());
+
+create policy "Admins can delete food notification targets"
+on public.food_notification_targets
 for delete
 using (public.is_admin());
 

@@ -146,6 +146,15 @@ export default function App() {
   const [bookings, setBookings] = useState([]);
   const [wasteLogs, setWasteLogs] = useState([]);
 
+  const [ngos, setNgos] = useState([]);
+  const [ngosLoading, setNgosLoading] = useState(false);
+  const [ngoForm, setNgoForm] = useState({ name: "", phone: "", email: "", area: "" });
+
+  const [foodNotifications, setFoodNotifications] = useState([]);
+  const [foodNotificationsLoading, setFoodNotificationsLoading] = useState(false);
+  const [foodNotificationNotice, setFoodNotificationNotice] = useState("");
+  const [foodNotificationForm, setFoodNotificationForm] = useState({ remaining_portions: "", area: "", notes: "" });
+
   const [allUsers, setAllUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [roleDraftByUserId, setRoleDraftByUserId] = useState({});
@@ -196,34 +205,42 @@ export default function App() {
   }, [profile?.admin_kind]);
 
   useEffect(() => {
-    if (!appLoading) return;
-    const watchdog = setTimeout(() => {
-      setAuthError(
-        "Loading timed out. This is usually caused by network/DNS issues reaching Supabase. Refresh and try again, or switch networks."
-      );
+    let alive = true;
+    let bootstrapped = false;
+
+    // Never keep the full app behind a spinner for too long.
+    const bootstrapTimeoutId = setTimeout(() => {
+      if (!alive || bootstrapped) return;
+      bootstrapped = true;
       setAppLoading(false);
-    }, 15000);
+    }, 4000);
 
-    return () => clearTimeout(watchdog);
-  }, [appLoading]);
-
-  useEffect(() => {
     const initAuth = async () => {
       try {
         const {
           data: { session: activeSession }
-        } = await withTimeout(supabase.auth.getSession(), 8000, "Auth initialization timed out");
+        } = await supabase.auth.getSession();
+
+        if (!alive) return;
         setSession(activeSession);
+        if (!bootstrapped) {
+          bootstrapped = true;
+          setAppLoading(false);
+        }
+
         if (activeSession?.user) {
-          await withTimeout(loadProfile(activeSession.user.id), 12000, "Profile load timed out");
-          setAuthError("");
+          void loadProfile(activeSession.user.id, activeSession.user);
         } else {
+          setProfile(null);
           setAuthError("");
         }
       } catch (error) {
+        if (!alive) return;
         setAuthError(formatSupabaseError(error, "Unable to initialize auth."));
-      } finally {
-        setAppLoading(false);
+        if (!bootstrapped) {
+          bootstrapped = true;
+          setAppLoading(false);
+        }
       }
     };
 
@@ -232,21 +249,26 @@ export default function App() {
     const {
       data: { subscription }
     } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+      if (!alive) return;
       setSession(newSession);
       try {
         if (newSession?.user) {
-          await loadProfile(newSession.user.id);
-          setAuthError("");
+          await loadProfile(newSession.user.id, newSession.user);
         } else {
           setProfile(null);
           setAuthError("");
         }
       } catch (error) {
+        if (!alive) return;
         setAuthError(formatSupabaseError(error, "Auth state change failed."));
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      alive = false;
+      clearTimeout(bootstrapTimeoutId);
+      subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -255,6 +277,10 @@ export default function App() {
     }
     void loadAllData();
     void loadMembership();
+    if (profile.role === "admin") {
+      void loadNgos();
+      void loadFoodNotifications();
+    }
 
     const channel = supabase
       .channel("meal-prebooking-realtime")
@@ -337,7 +363,7 @@ export default function App() {
 
     const name = hostelForm.name.trim();
     if (!name) {
-      setAuthError("Enter a hostel/hotel name.");
+      setAuthError("Enter a hostel/hotel/restaurant name.");
       return;
     }
 
@@ -381,9 +407,9 @@ export default function App() {
         }
       }
 
-      setAuthError(formatSupabaseError(lastError, "Failed to create hostel/hotel."));
+      setAuthError(formatSupabaseError(lastError, "Failed to create hostel/hotel/restaurant."));
     } catch (error) {
-      setAuthError(formatSupabaseError(error, "Failed to create hostel/hotel."));
+      setAuthError(formatSupabaseError(error, "Failed to create hostel/hotel/restaurant."));
     } finally {
       setCreatingHostel(false);
     }
@@ -403,7 +429,7 @@ export default function App() {
     try {
       const { data, error } = await supabase.rpc("join_hostel", { p_join_code: code });
       if (error) {
-        setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel."));
+        setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel/restaurant."));
         return;
       }
 
@@ -413,9 +439,184 @@ export default function App() {
       setJoinCode("");
       await loadMembership();
     } catch (error) {
-      setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel."));
+      setAuthError(formatSupabaseError(error, "Failed to join hostel/hotel/restaurant."));
     } finally {
       setMembershipLoading(false);
+    }
+  }
+
+  async function loadNgos() {
+    if (!session?.user || profile?.role !== "admin") return;
+    setNgosLoading(true);
+    try {
+      const { data, error } = await retryRead(
+        () => supabase.from("ngos").select("*").order("created_at", { ascending: false }),
+        { retries: 2 }
+      );
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to load NGOs."));
+        return;
+      }
+
+      setNgos(data || []);
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load NGOs."));
+    } finally {
+      setNgosLoading(false);
+    }
+  }
+
+  async function createNgo(e) {
+    e.preventDefault();
+    if (!session?.user || profile?.role !== "admin") return;
+
+    const name = ngoForm.name.trim();
+    if (!name) {
+      setAuthError("Enter NGO name.");
+      return;
+    }
+
+    try {
+      const { error } = await supabase.from("ngos").insert({
+        name,
+        phone: ngoForm.phone.trim() || null,
+        email: ngoForm.email.trim() || null,
+        area: ngoForm.area.trim() || null,
+        created_by: session.user.id
+      });
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to create NGO."));
+        return;
+      }
+
+      setNgoForm({ name: "", phone: "", email: "", area: "" });
+      setAuthError("");
+      await loadNgos();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to create NGO."));
+    }
+  }
+
+  async function deleteNgo(ngoId) {
+    if (!session?.user || profile?.role !== "admin") return;
+    try {
+      const { error } = await supabase.from("ngos").delete().eq("id", ngoId);
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to delete NGO."));
+        return;
+      }
+      setAuthError("");
+      setNgos((prev) => prev.filter((ngo) => ngo.id !== ngoId));
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to delete NGO."));
+    }
+  }
+
+  async function loadFoodNotifications() {
+    if (!session?.user || profile?.role !== "admin") return;
+    setFoodNotificationsLoading(true);
+    try {
+      const { data, error } = await retryRead(
+        () =>
+          supabase
+            .from("food_remaining_notifications")
+            .select(
+              "id, remaining_portions, area, notes, created_at, hostels ( id, name, kind ), food_notification_targets(count)"
+            )
+            .order("created_at", { ascending: false }),
+        { retries: 2 }
+      );
+
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to load food notifications."));
+        return;
+      }
+
+      setFoodNotifications(data || []);
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to load food notifications."));
+    } finally {
+      setFoodNotificationsLoading(false);
+    }
+  }
+
+  async function sendFoodRemainingNotification(e) {
+    e.preventDefault();
+    if (!session?.user || profile?.role !== "admin") return;
+
+    const remaining = Number(foodNotificationForm.remaining_portions);
+    if (!Number.isFinite(remaining) || remaining < 0) {
+      setAuthError("Enter a valid remaining food quantity (0 or more).");
+      return;
+    }
+
+    if (!myHostel?.id) {
+      setAuthError("Create or join a hostel/hotel/restaurant first (so the notification has a source)." );
+      return;
+    }
+
+    setFoodNotificationNotice("");
+    setAuthError("");
+
+    try {
+      const area = foodNotificationForm.area.trim();
+      const notes = foodNotificationForm.notes.trim();
+
+      const { data: created, error: createError } = await supabase
+        .from("food_remaining_notifications")
+        .insert({
+          hostel_id: myHostel.id,
+          created_by: session.user.id,
+          remaining_portions: remaining,
+          area: area || null,
+          notes: notes || null
+        })
+        .select("id")
+        .single();
+
+      if (createError) {
+        setAuthError(formatSupabaseError(createError, "Failed to send notification."));
+        return;
+      }
+
+      let ngoQuery = supabase.from("ngos").select("id");
+      if (area) {
+        ngoQuery = ngoQuery.ilike("area", `%${area}%`);
+      }
+
+      const { data: targetNgos, error: targetError } = await ngoQuery;
+      if (targetError) {
+        setAuthError(formatSupabaseError(targetError, "Notification created, but NGOs could not be loaded."));
+        await loadFoodNotifications();
+        return;
+      }
+
+      const targets = (targetNgos || []).map((ngo) => ({
+        notification_id: created.id,
+        ngo_id: ngo.id
+      }));
+
+      if (targets.length) {
+        const { error: targetInsertError } = await supabase.from("food_notification_targets").insert(targets);
+        if (targetInsertError) {
+          setAuthError(
+            formatSupabaseError(targetInsertError, "Notification created, but could not create NGO targets.")
+          );
+          await loadFoodNotifications();
+          return;
+        }
+      }
+
+      setFoodNotificationForm({ remaining_portions: "", area: "", notes: "" });
+      setFoodNotificationNotice(
+        `Notification sent. Matched ${targets.length} NGO${targets.length === 1 ? "" : "s"}${area ? ` near \"${area}\"` : ""}.`
+      );
+
+      await loadFoodNotifications();
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to send notification."));
     }
   }
 
@@ -465,7 +666,7 @@ export default function App() {
     }
   }
 
-  async function loadProfile(userId) {
+  async function loadProfile(userId, authUser = null) {
     try {
       const { data, error } = await retryRead(
         () => supabase.from("users").select("*").eq("id", userId).maybeSingle(),
@@ -492,11 +693,16 @@ export default function App() {
       }
 
       // Profile row is missing (common when signup/profile insert failed or the DB wasn't initialized).
-      const {
-        data: { session: activeSession }
-      } = await supabase.auth.getSession();
-      const email = activeSession?.user?.email || "";
-      const metadata = activeSession?.user?.user_metadata || {};
+      let effectiveUser = authUser;
+      if (!effectiveUser) {
+        const {
+          data: { session: activeSession }
+        } = await supabase.auth.getSession();
+        effectiveUser = activeSession?.user || null;
+      }
+
+      const email = effectiveUser?.email || "";
+      const metadata = effectiveUser?.user_metadata || {};
       const derivedName = (metadata.name || email.split("@")[0] || "user").trim() || "user";
       const derivedRole = metadata.role === "admin" ? "admin" : "user";
       const derivedAdminKind = derivedRole === "admin" ? metadata.admin_kind || metadata.adminKind : null;
@@ -1009,12 +1215,18 @@ export default function App() {
 
                   if (value === "admin:hotel") {
                     setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "hotel" }));
+                    return;
+                  }
+
+                  if (value === "admin:restaurant") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "restaurant" }));
                   }
                 }}
               >
                 <option value="user">User</option>
                 <option value="admin:hostel">Admin (Hostel)</option>
                 <option value="admin:hotel">Admin (Hotel)</option>
+                <option value="admin:restaurant">Admin (Restaurant)</option>
               </select>
 
               <input
@@ -1075,7 +1287,7 @@ export default function App() {
 
       <main className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-2">
         <section className="rounded-2xl bg-white p-5 shadow lg:col-span-2">
-          <h2 className="text-xl font-bold">Hostel / Hotel</h2>
+          <h2 className="text-xl font-bold">Hostel / Hotel / Restaurant</h2>
 
           {membershipLoading ? (
             <p className="mt-2 text-sm text-stone-600">Loading membership...</p>
@@ -1122,7 +1334,7 @@ export default function App() {
             <form className="mt-4 grid gap-2 md:grid-cols-3" onSubmit={handleCreateHostel}>
               <input
                 className="rounded-lg border border-stone-300 px-3 py-2 md:col-span-2"
-                placeholder="Hostel/Hotel name"
+                placeholder="Hostel/Hotel/Restaurant name"
                 value={hostelForm.name}
                 onChange={(e) => setHostelForm((prev) => ({ ...prev, name: e.target.value }))}
               />
@@ -1134,6 +1346,7 @@ export default function App() {
               >
                 <option value="hostel">Hostel</option>
                 <option value="hotel">Hotel</option>
+                <option value="restaurant">Restaurant</option>
               </select>
               <button
                 className="rounded-lg bg-moss px-4 py-2 text-sm font-semibold text-white disabled:opacity-70 md:col-span-3"
@@ -1440,6 +1653,159 @@ export default function App() {
                     })}
                   </tbody>
                 </table>
+              </div>
+            </section>
+
+            <section className="rounded-2xl bg-white p-5 shadow lg:col-span-2">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <h2 className="text-xl font-bold">NGO & Remaining Food Notifications</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void loadNgos();
+                    void loadFoodNotifications();
+                  }}
+                  className="rounded-lg bg-ink px-4 py-2 text-sm font-semibold text-white disabled:opacity-70"
+                  disabled={ngosLoading || foodNotificationsLoading}
+                >
+                  {ngosLoading || foodNotificationsLoading ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-6 lg:grid-cols-2">
+                <div className="rounded-xl border border-stone-200 p-4">
+                  <h3 className="text-sm font-bold">Add NGO (Admin only)</h3>
+                  <form className="mt-3 grid gap-2" onSubmit={createNgo}>
+                    <input
+                      className="rounded-lg border border-stone-300 px-3 py-2"
+                      placeholder="NGO name"
+                      value={ngoForm.name}
+                      onChange={(e) => setNgoForm((prev) => ({ ...prev, name: e.target.value }))}
+                      required
+                    />
+                    <input
+                      className="rounded-lg border border-stone-300 px-3 py-2"
+                      placeholder="Area / locality (for nearby matching)"
+                      value={ngoForm.area}
+                      onChange={(e) => setNgoForm((prev) => ({ ...prev, area: e.target.value }))}
+                    />
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <input
+                        className="rounded-lg border border-stone-300 px-3 py-2"
+                        placeholder="Phone (optional)"
+                        value={ngoForm.phone}
+                        onChange={(e) => setNgoForm((prev) => ({ ...prev, phone: e.target.value }))}
+                      />
+                      <input
+                        className="rounded-lg border border-stone-300 px-3 py-2"
+                        type="email"
+                        placeholder="Email (optional)"
+                        value={ngoForm.email}
+                        onChange={(e) => setNgoForm((prev) => ({ ...prev, email: e.target.value }))}
+                      />
+                    </div>
+                    <button className="rounded-lg bg-moss px-4 py-2 text-sm font-semibold text-white">Create NGO</button>
+                  </form>
+
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-semibold">NGO List</h4>
+                      {ngosLoading && <span className="text-xs text-stone-500">Loading...</span>}
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {ngos.map((ngo) => (
+                        <div key={ngo.id} className="flex items-start justify-between gap-3 rounded-lg bg-stone-50 p-3">
+                          <div>
+                            <div className="text-sm font-semibold">{ngo.name}</div>
+                            <div className="text-xs text-stone-600">
+                              {ngo.area ? `Area: ${ngo.area}` : "Area: -"}
+                              {ngo.phone ? ` | Phone: ${ngo.phone}` : ""}
+                              {ngo.email ? ` | Email: ${ngo.email}` : ""}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="rounded-lg bg-red-600 px-3 py-1 text-xs font-semibold text-white"
+                            onClick={() => deleteNgo(ngo.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                      {!ngosLoading && !ngos.length && <p className="text-sm text-stone-500">No NGOs added yet.</p>}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-stone-200 p-4">
+                  <h3 className="text-sm font-bold">Send Remaining Food Notification</h3>
+                  <p className="mt-1 text-xs text-stone-600">
+                    Sends an in-app notification to NGOs whose area matches (case-insensitive). Leave area blank to notify all NGOs.
+                  </p>
+
+                  <form className="mt-3 grid gap-2" onSubmit={sendFoodRemainingNotification}>
+                    <input
+                      className="rounded-lg border border-stone-300 px-3 py-2"
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="Remaining food (portions)"
+                      value={foodNotificationForm.remaining_portions}
+                      onChange={(e) =>
+                        setFoodNotificationForm((prev) => ({ ...prev, remaining_portions: e.target.value }))
+                      }
+                      required
+                    />
+                    <input
+                      className="rounded-lg border border-stone-300 px-3 py-2"
+                      placeholder='Area / locality (e.g. "Andheri" or "Sector 5")'
+                      value={foodNotificationForm.area}
+                      onChange={(e) => setFoodNotificationForm((prev) => ({ ...prev, area: e.target.value }))}
+                    />
+                    <textarea
+                      className="min-h-24 rounded-lg border border-stone-300 px-3 py-2"
+                      placeholder="Notes (optional: what food, pickup time, etc.)"
+                      value={foodNotificationForm.notes}
+                      onChange={(e) => setFoodNotificationForm((prev) => ({ ...prev, notes: e.target.value }))}
+                    />
+                    <button className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white">Send to NGOs</button>
+                    {foodNotificationNotice && <p className="text-xs text-moss">{foodNotificationNotice}</p>}
+                  </form>
+
+                  <div className="mt-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-semibold">Sent Notifications</h4>
+                      {foodNotificationsLoading && <span className="text-xs text-stone-500">Loading...</span>}
+                    </div>
+
+                    <div className="mt-2 space-y-2">
+                      {foodNotifications.map((n) => {
+                        const targetCount = Array.isArray(n.food_notification_targets)
+                          ? n.food_notification_targets[0]?.count || 0
+                          : 0;
+
+                        return (
+                          <div key={n.id} className="rounded-lg bg-stone-50 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="text-sm font-semibold">
+                                {n.hostels?.name ? `${n.hostels.name} (${n.hostels.kind})` : "Source"} → {targetCount} NGO{targetCount === 1 ? "" : "s"}
+                              </div>
+                              <div className="text-xs text-stone-600">{n.created_at ? formatDateTime(n.created_at) : ""}</div>
+                            </div>
+                            <div className="mt-1 text-xs text-stone-700">
+                              Remaining: <span className="font-semibold">{n.remaining_portions}</span> portions
+                              {n.area ? ` | Area: ${n.area}` : ""}
+                            </div>
+                            {n.notes && <div className="mt-1 text-xs text-stone-600">{n.notes}</div>}
+                          </div>
+                        );
+                      })}
+                      {!foodNotificationsLoading && !foodNotifications.length && (
+                        <p className="text-sm text-stone-500">No notifications sent yet.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
             </section>
 
