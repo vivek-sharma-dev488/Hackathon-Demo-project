@@ -1808,7 +1808,9 @@ export default function App() {
                 </button>
               </div>
 
-              <p className="mt-2 text-sm text-stone-600">User roles are fixed. Role changes are disabled in the app.</p>
+              <p className="mt-2 text-sm text-stone-600">
+                User roles are fixed. Role changes are disabled in the app.
+              </p>
 
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full text-left text-sm">
