@@ -125,9 +125,6 @@ async function retryRead(fn, { retries = 2, baseDelayMs = 400 } = {}) {
 }
 
 export default function App() {
-  const isAdminAuthPath = window.location.pathname.toLowerCase().startsWith("/admin");
-  const forcedAuthRole = isAdminAuthPath ? "admin" : "user";
-
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [authMode, setAuthMode] = useState("login");
@@ -141,6 +138,7 @@ export default function App() {
     name: "",
     email: "",
     password: "",
+    role: "user",
     adminKind: "hostel"
   });
 
@@ -159,6 +157,7 @@ export default function App() {
 
   const [allUsers, setAllUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [roleDraftByUserId, setRoleDraftByUserId] = useState({});
 
   const [membershipLoading, setMembershipLoading] = useState(false);
   const [myMembership, setMyMembership] = useState(null);
@@ -187,6 +186,18 @@ export default function App() {
   const isAdmin = profile?.role === "admin";
   const authCooldownSeconds = Math.max(0, Math.ceil((authCooldownUntil - Date.now()) / 1000));
   const isAuthCooldown = authCooldownSeconds > 0;
+
+  useEffect(() => {
+    setRoleDraftByUserId((prev) => {
+      const next = { ...prev };
+      for (const user of allUsers) {
+        if (!(user.id in next)) {
+          next[user.id] = user.role;
+        }
+      }
+      return next;
+    });
+  }, [allUsers]);
 
   useEffect(() => {
     if (!profile?.admin_kind) return;
@@ -642,6 +653,24 @@ export default function App() {
     }
   }
 
+  async function updateUserRole(userId, newRole) {
+    if (!isAdmin) return;
+    try {
+      const { error } = await supabase.from("users").update({ role: newRole }).eq("id", userId);
+      if (error) {
+        setAuthError(formatSupabaseError(error, "Failed to update user role."));
+        return;
+      }
+
+      setAllUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+      setRoleDraftByUserId((prev) => ({ ...prev, [userId]: newRole }));
+      await loadUsers();
+      setAuthError("");
+    } catch (error) {
+      setAuthError(formatSupabaseError(error, "Failed to update user role."));
+    }
+  }
+
   async function loadProfile(userId, authUser = null) {
     try {
       const { data, error } = await retryRead(
@@ -763,7 +792,7 @@ export default function App() {
 
     try {
       const name = authForm.name?.trim() || "";
-      const adminKind = forcedAuthRole === "admin" ? authForm.adminKind : null;
+      const adminKind = authForm.role === "admin" ? authForm.adminKind : null;
 
       const doSignup = async () =>
         await supabase.auth.signUp({
@@ -772,7 +801,7 @@ export default function App() {
           options: {
             data: {
               name,
-              role: forcedAuthRole,
+              role: authForm.role,
               admin_kind: adminKind
             }
           }
@@ -819,7 +848,7 @@ export default function App() {
         const { error: profileError } = await supabase.from("users").insert({
           id: data.user.id,
           name: resolvedName,
-          role: forcedAuthRole,
+          role: authForm.role,
           admin_kind: adminKind
         });
 
@@ -852,34 +881,21 @@ export default function App() {
           setAuthCooldownUntil(Date.now() + 60_000);
         }
         setAuthError(formatSupabaseError(error, "Login failed."));
-        setAuthLoading(false);
-        return;
       }
 
-      if (data?.user?.id) {
+      // If the user explicitly chose Admin login, fail fast for non-admin accounts.
+      if (authForm.role === "admin" && data?.user?.id) {
         const { data: profileRow } = await supabase
           .from("users")
           .select("role")
           .eq("id", data.user.id)
           .maybeSingle();
 
-        const metadataRole = data.user.user_metadata?.role === "admin" ? "admin" : "user";
-        const effectiveRole = profileRow?.role || metadataRole;
-
-        if (isAdminAuthPath && effectiveRole !== "admin") {
+        if (profileRow && profileRow.role !== "admin") {
           await supabase.auth.signOut();
           setSession(null);
           setProfile(null);
-          setAuthError("This account is not an admin. Use an admin account at /admin.");
-          return;
-        }
-
-        if (!isAdminAuthPath && effectiveRole !== "user") {
-          await supabase.auth.signOut();
-          setSession(null);
-          setProfile(null);
-          setAuthError("Only user accounts can login here. Admins should login at /admin.");
-          return;
+          setAuthError("This account is not an admin. Select User login or use an admin account.");
         }
       }
     } catch (error) {
@@ -1149,6 +1165,8 @@ export default function App() {
   }
 
   if (!session) {
+    const accountTypeValue = authForm.role === "admin" ? `admin:${authForm.adminKind}` : "user";
+
     return (
       <div className="min-h-screen bg-surface px-4 py-10 md:px-8">
         <div className="mx-auto max-w-5xl rounded-3xl bg-gradient-to-br from-moss to-ink p-8 text-white shadow-2xl md:p-10">
@@ -1158,8 +1176,6 @@ export default function App() {
           </p>
 
           <div className="mt-8 rounded-2xl bg-white/95 p-6 text-ink backdrop-blur md:p-8">
-            <p className="mb-3 text-base font-bold">{isAdminAuthPath ? "Admin Login" : "User Login"}</p>
-
             <div className="mb-4 flex gap-2">
               <button
                 className={`rounded-xl px-4 py-2 text-sm font-semibold ${authMode === "login" ? "bg-coral text-white" : "bg-stone-200"}`}
@@ -1187,17 +1203,36 @@ export default function App() {
                 />
               )}
 
-              {isAdminAuthPath && authMode === "signup" && (
-                <select
-                  className="rounded-xl border border-stone-300 px-3 py-2"
-                  value={authForm.adminKind}
-                  onChange={(e) => setAuthForm((prev) => ({ ...prev, adminKind: e.target.value }))}
-                >
-                  <option value="hostel">Admin (Hostel)</option>
-                  <option value="hotel">Admin (Hotel)</option>
-                  <option value="restaurant">Admin (Restaurant)</option>
-                </select>
-              )}
+              <select
+                className="rounded-xl border border-stone-300 px-3 py-2"
+                value={accountTypeValue}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "user") {
+                    setAuthForm((prev) => ({ ...prev, role: "user" }));
+                    return;
+                  }
+
+                  if (value === "admin:hostel") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "hostel" }));
+                    return;
+                  }
+
+                  if (value === "admin:hotel") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "hotel" }));
+                    return;
+                  }
+
+                  if (value === "admin:restaurant") {
+                    setAuthForm((prev) => ({ ...prev, role: "admin", adminKind: "restaurant" }));
+                  }
+                }}
+              >
+                <option value="user">User</option>
+                <option value="admin:hostel">Admin (Hostel)</option>
+                <option value="admin:hotel">Admin (Hotel)</option>
+                <option value="admin:restaurant">Admin (Restaurant)</option>
+              </select>
 
               <input
                 className="rounded-xl border border-stone-300 px-3 py-2"
@@ -1229,13 +1264,6 @@ export default function App() {
                       ? "Create account"
                       : "Login"}
               </button>
-
-              {!isAdminAuthPath && authMode === "login" && (
-                <p className="text-sm text-stone-600">
-                  Admin account? Login from <a className="font-semibold text-moss underline" href="/admin">/admin</a>.
-                </p>
-              )}
-
               {authError && <p className="text-sm text-red-600">{authError}</p>}
             </form>
           </div>
@@ -1808,7 +1836,9 @@ export default function App() {
                 </button>
               </div>
 
-              <p className="mt-2 text-sm text-stone-600">User roles are fixed. Role changes are disabled in the app.</p>
+              <p className="mt-2 text-sm text-stone-600">
+                Promote or demote users by changing their role. This requires the admin RLS policies from the provided SQL schema.
+              </p>
 
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -1817,10 +1847,12 @@ export default function App() {
                       <th className="py-2">Name</th>
                       <th className="py-2">Role</th>
                       <th className="py-2">Created</th>
+                      <th className="py-2">Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {allUsers.map((user) => {
+                      const draftRole = roleDraftByUserId[user.id] || user.role;
                       const isSelf = user.id === session?.user?.id;
 
                       return (
@@ -1829,15 +1861,39 @@ export default function App() {
                             <div className="font-semibold">{user.name}</div>
                             {isSelf && <div className="text-xs text-stone-500">This is you</div>}
                           </td>
-                          <td className="py-2">{user.role}</td>
+                          <td className="py-2">
+                            <select
+                              className="rounded-lg border border-stone-300 px-3 py-1"
+                              value={draftRole}
+                              onChange={(e) =>
+                                setRoleDraftByUserId((prev) => ({
+                                  ...prev,
+                                  [user.id]: e.target.value
+                                }))
+                              }
+                            >
+                              <option value="user">User</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </td>
                           <td className="py-2 text-stone-600">{user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</td>
+                          <td className="py-2">
+                            <button
+                              type="button"
+                              className="rounded-lg bg-moss px-3 py-1 text-xs font-semibold text-white disabled:opacity-70"
+                              disabled={draftRole === user.role}
+                              onClick={() => updateUserRole(user.id, draftRole)}
+                            >
+                              Save
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
 
                     {!usersLoading && !allUsers.length && (
                       <tr>
-                        <td className="py-3 text-stone-500" colSpan={3}>
+                        <td className="py-3 text-stone-500" colSpan={4}>
                           No users found (or you don’t have permission to list users).
                         </td>
                       </tr>
